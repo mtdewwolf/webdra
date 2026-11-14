@@ -71,7 +71,7 @@ const initialState: WorkspaceState = {
   notice: '',
 };
 
-interface WorkspaceApi {
+export interface WorkspaceApi {
   state: WorkspaceState;
   openFile: (file: File, lenient?: boolean) => Promise<void>;
   cancel: () => void;

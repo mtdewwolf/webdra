@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { fileOffsetForVa } from '../../src/binary/address';
+import { fileOffsetForVa, vaForFileOffset } from '../../src/binary/address';
 import { disassembleFunction } from '../../src/analysis/disasm';
-import type { ParsedBinary } from '../../src/ir/types';
 import { extractStrings } from '../../src/analysis/strings';
 import { parseBinary, ParseError } from '../../src/binary/parse';
 
@@ -62,32 +61,40 @@ describe('compiled fixtures', () => {
     expect(binary.entryPoint).toBe(exported!.address);
   });
 
-  it('parses Mach-O slices and disassembles _main from the original file', async () => {
+  it('disassembles _main from both fat slices at original-file offsets', async () => {
     const bytes = load('macho-fat');
-    const binary = parseBinary(bytes);
-    expect(binary.format).toBe('macho');
-    expect(binary.slices.length).toBe(2);
-    const main = binary.symbols.find((symbol) => symbol.name === '_main');
-    expect(main?.kind).toBe('function');
-    const decoded = await disassembleFunction(bytes, binary, main!.address);
-    expect(decoded.instructions.map((instruction) => instruction.mnemonic)).toEqual(['mov', 'ret']);
-    const fileOffset = binary.sections.find((section) => section.executable)?.fileOffset;
-    expect(fileOffset).toBeGreaterThan(0);
-    expect(bytes[fileOffsetForExecutable(binary, main!.address)]).toBe(decoded.instructions[0]?.bytes[0]);
-    const arm = parseBinary(bytes, { sliceOffset: binary.slices[1]!.offset });
-    expect(arm.arch.arch).toBe('arm64');
-    const armMain = arm.symbols.find((symbol) => symbol.name === '_main');
-    const armFn = await disassembleFunction(bytes, arm, armMain!.address);
-    expect(armFn.instructions.map((instruction) => instruction.mnemonic)).toEqual(['mov', 'ret']);
-    expect(bytes[fileOffsetForExecutable(arm, armMain!.address)]).toBe(armFn.instructions[0]?.bytes[0]);
+    const header = parseBinary(bytes);
+    expect(header.format).toBe('macho');
+    expect(header.slices.map((slice) => slice.arch)).toEqual(['x86-64', 'arm64']);
+    for (const slice of header.slices) {
+      const binary = parseBinary(bytes, { sliceOffset: slice.offset });
+      const thin = parseBinary(bytes.subarray(slice.offset, slice.offset + slice.size));
+      expect(slice.offset).toBeGreaterThan(0);
+      for (const section of thin.sections) {
+        const fatSection = binary.sections.find((item) => item.name === section.name && item.address === section.address);
+        expect(fatSection?.fileOffset).toBe(section.fileOffset + slice.offset);
+      }
+      const main = binary.symbols.find((symbol) => symbol.name === '_main');
+      expect(main?.kind).toBe('function');
+      const decoded = await disassembleFunction(bytes, binary, main!.address);
+      expect(decoded.instructions.map((instruction) => instruction.mnemonic)).toEqual(['mov', 'ret']);
+      const first = decoded.instructions[0];
+      expect(first?.bytes.some((value) => value !== 0)).toBe(true);
+      const fileOffset = fileOffsetForVa(binary, main!.address);
+      expect(fileOffset).not.toBeNull();
+      expect(fileOffset!).toBeGreaterThanOrEqual(slice.offset);
+      expect(fileOffset!).toBeLessThan(slice.offset + slice.size);
+      expect([...bytes.subarray(fileOffset!, fileOffset! + (first?.size ?? 0))]).toEqual(first?.bytes);
+      expect(vaForFileOffset(binary, fileOffset!)).toBe(main!.address);
+      const text = extractStrings(bytes, binary, 4).strings.find((item) => item.text.includes('webdra-fixture-string'));
+      expect(text).toBeTruthy();
+      expect(text!.fileOffset).toBeGreaterThanOrEqual(slice.offset);
+      expect(text!.fileOffset).toBeLessThan(slice.offset + slice.size);
+      const encoded = new TextEncoder().encode(text!.text);
+      expect([...bytes.subarray(text!.fileOffset, text!.fileOffset + encoded.length)]).toEqual([...encoded]);
+    }
   });
 });
-
-function fileOffsetForExecutable(binary: ParsedBinary, address: number): number {
-  const offset = fileOffsetForVa(binary, address);
-  expect(offset).not.toBeNull();
-  return offset ?? 0;
-}
 
 describe('malformed input', () => {
   it('rejects a truncated ELF until parse-anyway is requested', () => {
