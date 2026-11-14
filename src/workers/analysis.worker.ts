@@ -1,7 +1,7 @@
-import { AnalysisCancelled, analyzeImage, disassembleAt } from '../analysis/analyze';
+import { AnalysisCancelled, analyzeImage, disassembleAt, seedFunctions } from '../analysis/analyze';
 import { parseBytePattern, searchBytePattern } from '../analysis/pattern';
 import { openEngine, type CsEngine } from '../analysis/capstone';
-import { ParseError } from '../binary/parse';
+import { ParseError, parseBinary } from '../binary/parse';
 import type { FunctionSummary, ParsedBinary } from '../ir/types';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 
@@ -38,17 +38,16 @@ scope.onmessage = (event) => {
   }
   if (message.kind === 'pattern') {
     runPattern(message.id, message.pattern);
+    return;
+  }
+  if (message.kind === 'restore') {
+    void runRestore(message.id, message.buffer, message.lenient, message.sliceOffset);
   }
 };
 
 async function runAnalyze(id: number, buffer: ArrayBuffer, lenient: boolean, sliceOffset: number | null): Promise<void> {
-  const signal = { aborted: false };
-  const timer = setInterval(() => {
-    signal.aborted = id !== activeId;
-  }, 30);
+  const signal = { get aborted() { return id !== activeId; } };
   try {
-    session?.engine?.close();
-    session = null;
     const bytes = new Uint8Array(buffer);
     const result = await analyzeImage(bytes, {
       lenient,
@@ -62,7 +61,8 @@ async function runAnalyze(id: number, buffer: ArrayBuffer, lenient: boolean, sli
       scope.postMessage({ kind: 'cancelled', id });
       return;
     }
-    const engine = await openEngine(result.binary.arch, false);
+    session?.engine?.close();
+    const engine = await openEngine(result.binary.arch, (result.binary.entryPoint ?? 0) & 1 ? result.binary.arch.arch === 'arm' : false);
     session = { bytes, binary: result.binary, engine, functions: result.functions };
     scope.postMessage({ kind: 'analyzed', id, result });
   } catch (error) {
@@ -76,8 +76,26 @@ async function runAnalyze(id: number, buffer: ArrayBuffer, lenient: boolean, sli
       message: error instanceof Error ? error.message : 'Analysis failed',
       recoverable: error instanceof ParseError ? error.recoverable : false,
     });
-  } finally {
-    clearInterval(timer);
+  }
+}
+
+async function runRestore(id: number, buffer: ArrayBuffer, lenient: boolean, sliceOffset: number | null): Promise<void> {
+  try {
+    session?.engine?.close();
+    const bytes = new Uint8Array(buffer);
+    const binary = parseBinary(bytes, { lenient, sliceOffset });
+    const thumb = binary.arch.arch === 'arm' && ((binary.entryPoint ?? 0) & 1) === 1;
+    const engine = await openEngine(binary.arch, thumb);
+    session = { bytes, binary, engine, functions: seedFunctions(binary) };
+    scope.postMessage({ kind: 'restored', id });
+  } catch (error) {
+    session = null;
+    scope.postMessage({
+      kind: 'error',
+      id,
+      message: error instanceof Error ? error.message : 'Could not restore the analysis session',
+      recoverable: false,
+    });
   }
 }
 

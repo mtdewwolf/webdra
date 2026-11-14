@@ -131,15 +131,40 @@ export function HexPane() {
   const { state, selectFileOffset } = useWorkspace();
   const bytes = state.bytes;
   const binary = state.binary;
-  if (!bytes || !binary) return <section className="pane" aria-label="Hex"><header className="pane-title">Hex</header><p className="empty">No file open.</p></section>;
-  const rows = Math.ceil(bytes.length / 16);
+  const rows = bytes ? Math.ceil(bytes.length / 16) : 0;
   const selectedRow = state.selectedFileOff === null ? null : Math.floor(state.selectedFileOff / 16);
+  const pageRows = 4096;
+  const pageCount = Math.max(1, Math.ceil(rows / pageRows));
+  const selectedPage = selectedRow === null ? 0 : Math.min(pageCount - 1, Math.floor(selectedRow / pageRows));
+  const [page, setPage] = useState(0);
+  const visiblePage = Math.min(page, pageCount - 1);
+  useEffect(() => {
+    setPage(selectedPage);
+  }, [selectedPage]);
+  if (!bytes || !binary) return <section className="pane" aria-label="Hex"><header className="pane-title">Hex</header><p className="empty">No file open.</p></section>;
+  const pageStart = visiblePage * pageRows;
+  const visibleRows = Math.min(pageRows, Math.max(0, rows - pageStart));
   return (
     <section className="pane" aria-label="Hex view" data-testid="hex">
       <header className="pane-title">Hex</header>
-      <VirtualList count={rows} rowHeight={20} scrollToIndex={selectedRow}>
+      {pageCount > 1 && (
+        <div className="hex-pager">
+          <button type="button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={visiblePage === 0}>Prev</button>
+          <input
+            aria-label="Hex page"
+            type="range"
+            min={0}
+            max={pageCount - 1}
+            value={visiblePage}
+            onChange={(event) => setPage(Number(event.target.value))}
+          />
+          <button type="button" onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))} disabled={visiblePage >= pageCount - 1}>Next</button>
+          <span>{visiblePage + 1}/{pageCount}</span>
+        </div>
+      )}
+      <VirtualList count={visibleRows} rowHeight={20} scrollToIndex={selectedRow === null ? null : selectedRow - pageStart}>
         {(index) => {
-          const offset = index * 16;
+          const offset = (pageStart + index) * 16;
           const va = vaLabel(binary, offset);
           const chunk: number[] = [];
           let ascii = '';
@@ -149,7 +174,7 @@ export function HexPane() {
             chunk.push(value);
             ascii += value >= 0x20 && value <= 0x7e ? String.fromCharCode(value) : '.';
           }
-          const active = selectedRow === index;
+          const active = selectedRow === pageStart + index;
           return (
             <button type="button" className={active ? 'hex-row selected' : 'hex-row'} onClick={() => selectFileOffset(offset)}>
               <span className="addr">{va}</span>
@@ -253,33 +278,38 @@ export function HeadersPane() {
         </tbody>
       </table>
       <h3>Sections</h3>
-      <table>
-        <thead><tr><th>Name</th><th>Address</th><th>Size</th><th>Flags</th></tr></thead>
-        <tbody>
-          {binary.sections.map((section) => (
-            <tr key={`${section.name}-${section.address}`}>
-              <td><BinaryText value={section.name} /></td>
-              <td>{formatAddress(section.address, binary.arch.bits)}</td>
-              <td>{section.size.toString(16)}</td>
-              <td>{section.flags.join('')}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <VirtualList count={binary.sections.length} rowHeight={22}>
+        {(index) => {
+          const section = binary.sections[index];
+          if (!section) return null;
+          return (
+            <div className="row">
+              <span><BinaryText value={section.name} /></span>
+              <span className="addr">{formatAddress(section.address, binary.arch.bits)}</span>
+              <span>{section.size.toString(16)}</span>
+              <span>{section.flags.join('')}</span>
+            </div>
+          );
+        }}
+      </VirtualList>
       <h3>Symbols</h3>
       <SymbolTable />
       <h3>Imports</h3>
-      <ul className="plain-list">
-        {binary.imports.map((item, index) => (
-          <li key={`${item.library}-${item.name}-${index}`}>{item.library ? `${item.library}!` : ''}{item.name}</li>
-        ))}
-      </ul>
+      <VirtualList count={binary.imports.length} rowHeight={22}>
+        {(index) => {
+          const item = binary.imports[index];
+          if (!item) return null;
+          return <div className="row"><BinaryText value={`${item.library ? `${item.library}!` : ''}${item.name}`} /></div>;
+        }}
+      </VirtualList>
       <h3>Exports</h3>
-      <ul className="plain-list">
-        {binary.exports.map((item) => (
-          <li key={`${item.name}-${item.address}`}>{item.name} {formatAddress(item.address, binary.arch.bits)}</li>
-        ))}
-      </ul>
+      <VirtualList count={binary.exports.length} rowHeight={22}>
+        {(index) => {
+          const item = binary.exports[index];
+          if (!item) return null;
+          return <div className="row"><BinaryText value={`${item.name} ${formatAddress(item.address, binary.arch.bits)}`} /></div>;
+        }}
+      </VirtualList>
     </section>
   );
 }

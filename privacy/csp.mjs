@@ -46,7 +46,11 @@ export const extraHeaders = {
 };
 
 export function renderHeadersFile() {
-  const lines = ['/*'];
+  const lines = [
+    '/*',
+    '  # Strict-Transport-Security is for a custom HTTPS domain. Uncomment when you serve Webdra on your own domain:',
+    '  # Strict-Transport-Security: max-age=31536000; includeSubDomains',
+  ];
   for (const [name, value] of Object.entries(extraHeaders)) {
     lines.push(`  ${name}: ${value}`);
   }

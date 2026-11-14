@@ -1,4 +1,5 @@
 import { assertFileSize, isExecutableAddress } from '../binary/address';
+import { mergeFileSpans } from '../binary/ranges';
 import { ParseError, parseBinary } from '../binary/parse';
 import type { AnalyzeResult, FunctionIR, FunctionSummary, ParsedBinary, XrefIR } from '../ir/types';
 import { openEngine, type CsEngine } from './capstone';
@@ -147,15 +148,19 @@ function scanStringAddresses(bytes: Uint8Array, binary: ParsedBinary, strings: {
   for (const item of strings) targets.set(item.address, item.address);
   const width = binary.arch.bits === 64 ? 8 : 4;
   const xrefs: XrefIR[] = [];
-  for (const section of binary.sections) {
-    if (!section.executable || section.fileSize < width) continue;
-    const start = section.fileOffset;
-    const end = Math.min(bytes.length, section.fileOffset + section.fileSize) - width;
-    for (let offset = start; offset <= end; offset += 1) {
+  const spans = mergeFileSpans(binary.sections.filter((section) => section.executable && section.fileSize >= width).map((section) => ({
+    start: section.fileOffset,
+    end: Math.min(bytes.length, section.fileOffset + section.fileSize),
+    address: section.address,
+    name: section.name,
+  }))).spans;
+  for (const span of spans) {
+    const end = span.end - width;
+    for (let offset = span.start; offset <= end; offset += 1) {
       const value = readUnsigned(bytes, offset, width);
       const hit = targets.get(value);
       if (hit === undefined) continue;
-      xrefs.push({ from: section.address + (offset - section.fileOffset), to: hit, kind: 'data' });
+      xrefs.push({ from: span.address + (offset - span.start), to: hit, kind: 'data' });
       if (xrefs.length > 50000) return xrefs;
     }
   }

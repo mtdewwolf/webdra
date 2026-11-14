@@ -46,7 +46,7 @@ The primary target is Cloudflare Workers static assets (`wrangler.jsonc`):
 - `observability.enabled` and `logpush` are false
 - `workers_dev` is true
 
-GitHub Actions workflow **Deploy** runs on push to `Master` and on `workflow_dispatch`. It runs the unit tests, production build, bundle check, and Playwright test before `cloudflare/wrangler-action`. Deploy runs only when `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set. Otherwise it prints a notice and succeeds without deploying. The token needs **Workers Scripts: Edit**. Do not grant Tail, Logpush, or Analytics, and do not enable Cloudflare Web Analytics.
+GitHub Actions workflow **Deploy** runs on push to `Master` and on `workflow_dispatch`. It runs the unit tests, production build, bundle check, and Playwright test before `npx wrangler deploy`. Deploy runs only when `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set. Otherwise it prints a notice and succeeds without deploying. The token needs **Workers Scripts: Edit**. Do not grant Tail, Logpush, or Analytics, and do not enable Cloudflare Web Analytics. The deploy job uses the GitHub Environment named `production`. Steven can add required reviewers on that environment before a push to `Master` publishes the site. Wrangler is pinned as a devDependency and the workflow runs it from the lockfile.
 
 `public/_headers` is copied into the build and becomes the real response headers, including `frame-ancestors 'none'`. The meta policy stays as a second layer. See [PRIVACY.md](PRIVACY.md).
 

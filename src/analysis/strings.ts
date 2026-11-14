@@ -1,3 +1,4 @@
+import { mergeFileSpans } from '../binary/ranges';
 import type { ParsedBinary, StringEncoding, StringIR } from '../ir/types';
 
 const MAX_STRINGS = 20000;
@@ -6,14 +7,20 @@ const MAX_STRING_LENGTH = 512;
 export function extractStrings(bytes: Uint8Array, binary: ParsedBinary, minimum = 4): { strings: StringIR[]; truncated: boolean } {
   const found: StringIR[] = [];
   const regions = binary.sections.filter((section) => section.fileSize > 0);
-  const sources = regions.length
-    ? regions.map((section) => ({
+  const merged = regions.length
+    ? mergeFileSpans(regions.map((section) => ({
         name: section.name,
-        offset: section.fileOffset,
-        size: Math.min(section.fileSize, Math.max(0, bytes.length - section.fileOffset)),
+        start: section.fileOffset,
+        end: Math.min(bytes.length, section.fileOffset + section.fileSize),
         address: section.address,
-      }))
-    : [{ name: '', offset: 0, size: bytes.length, address: 0 }];
+      })))
+    : { spans: [{ name: '', start: 0, end: bytes.length, address: 0 }], truncated: false };
+  const sources = merged.spans.map((span) => ({
+    name: span.name,
+    offset: span.start,
+    size: Math.max(0, span.end - span.start),
+    address: span.address,
+  }));
 
   for (const source of sources) {
     if (found.length >= MAX_STRINGS) break;
@@ -21,7 +28,7 @@ export function extractStrings(bytes: Uint8Array, binary: ParsedBinary, minimum 
     collectUtf16(bytes, source, minimum, found);
   }
   found.sort((a, b) => a.fileOffset - b.fileOffset);
-  return { strings: found.slice(0, MAX_STRINGS), truncated: found.length > MAX_STRINGS };
+  return { strings: found.slice(0, MAX_STRINGS), truncated: found.length > MAX_STRINGS || merged.truncated };
 }
 
 function collectAscii(

@@ -15,8 +15,9 @@ export async function disassembleFunction(
   endLimit?: number,
   engine?: CsEngine | null,
 ): Promise<FunctionIR> {
-  const owned = engine === undefined;
-  const active = engine === undefined ? await openEngine(binary.arch, (address & 1) === 1 && binary.arch.arch === 'arm') : engine;
+  const thumb = binary.arch.arch === 'arm' && (address & 1) === 1;
+  const owned = engine === undefined || thumb;
+  const active = owned ? await openEngine(binary.arch, thumb) : engine;
   const start = binary.arch.arch === 'arm' ? address & ~1 : address;
   const span = executableSpan(binary, start);
   const limit = endLimit ?? span?.end ?? start + 0x4000;

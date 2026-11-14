@@ -23,7 +23,7 @@ export function parseHeadersFile(text) {
   const rules = [];
   let current = null;
   for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
+    if (!line.trim() || line.trim().startsWith('#')) continue;
     if (!/^\s/.test(line)) {
       current = { pattern: line.trim(), headers: {} };
       rules.push(current);

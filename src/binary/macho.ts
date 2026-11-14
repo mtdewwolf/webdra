@@ -6,7 +6,10 @@ const MH_CIGAM = 0xcefaedfe;
 const MH_MAGIC_64 = 0xfeedfacf;
 const MH_CIGAM_64 = 0xcffaedfe;
 const FAT_MAGIC = 0xcafebabe;
-const FAT_CIGAM = 0xbebafeca;
+const FAT_MAGIC_64 = 0xcafebabf;
+const MAX_MACHO_SECTIONS = 8192;
+const MAX_TRIE_NODES = 100_000;
+const MAX_TRIE_EXPORTS = 100_000;
 const LC_SEGMENT = 0x1;
 const LC_SYMTAB = 0x2;
 const LC_UNIXTHREAD = 0x5;
@@ -71,31 +74,48 @@ export function parseMacho(bytes: Uint8Array, lenient: boolean, sliceOffset: num
 
 export function isMacho(bytes: Uint8Array): boolean {
   if (bytes.length < 4) return false;
-  const magic = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
-  return magic === MH_MAGIC || magic === MH_CIGAM || magic === MH_MAGIC_64 || magic === MH_CIGAM_64 || magic === FAT_MAGIC || magic === FAT_CIGAM;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const little = view.getUint32(0, true);
+  if (little === MH_MAGIC || little === MH_CIGAM || little === MH_MAGIC_64 || little === MH_CIGAM_64) return true;
+  if (bytes.length < 8) return false;
+  const big = view.getUint32(0, false);
+  if (big !== FAT_MAGIC && big !== FAT_MAGIC_64 && little !== FAT_MAGIC) return false;
+  const bigEndian = big === FAT_MAGIC || big === FAT_MAGIC_64;
+  const count = view.getUint32(4, !bigEndian);
+  if (count < 1 || count > 32) return false;
+  if (big === FAT_MAGIC) {
+    const minor = count >>> 16;
+    const major = count & 0xffff;
+    if (minor < 64 && major >= 45 && major <= 80) return false;
+  }
+  return true;
 }
 
 function readFat(reader: Reader, warnings: string[], lenient: boolean): SliceInfo[] {
-  const big = reader.u32be(0) === FAT_MAGIC;
-  const littleFat = reader.u32(0) === FAT_MAGIC;
+  const beMagic = reader.u32be(0);
+  const fat64 = beMagic === FAT_MAGIC_64;
+  const big = beMagic === FAT_MAGIC || fat64;
+  const littleFat = !big && reader.u32(0) === FAT_MAGIC;
   if (!big && !littleFat) {
     return [{ offset: 0, size: reader.length, cpuType: 0, cpuSubtype: 0 }];
   }
   const count = big ? reader.u32be(4) : reader.u32(4);
-  if (count <= 0 || count > 32) {
+  if (count <= 0 || count > 32 || (beMagic === FAT_MAGIC && looksLikeJavaClass(count))) {
     const message = `Implausible fat slice count ${count}`;
     if (!lenient) throw new ParseError(message, true);
     warnings.push(message);
     return [{ offset: 0, size: reader.length, cpuType: 0, cpuSubtype: 0 }];
   }
+  const stride = fat64 ? 32 : 20;
   const slices: SliceInfo[] = [];
   for (let index = 0; index < count; index += 1) {
-    const at = 8 + index * 20;
+    const at = 8 + index * stride;
     try {
       const cpuType = big ? reader.i32be(at) : reader.i32(at);
       const cpuSubtype = big ? reader.i32be(at + 4) : reader.i32(at + 4);
-      const offset = big ? reader.u32be(at + 8) : reader.u32(at + 8);
-      const size = big ? reader.u32be(at + 12) : reader.u32(at + 12);
+      const offset = fat64 ? readFat64(reader, at + 8) : (big ? reader.u32be(at + 8) : reader.u32(at + 8));
+      const size = fat64 ? readFat64(reader, at + 16) : (big ? reader.u32be(at + 12) : reader.u32(at + 12));
+      if (offset === null || size === null) throw new ParseError(`Fat slice ${index} is too large to address`, true);
       if (offset + size > reader.length) throw new ParseError(`Fat slice ${index} is truncated`, true);
       slices.push({ offset, size, cpuType, cpuSubtype });
     } catch (error) {
@@ -106,6 +126,19 @@ function readFat(reader: Reader, warnings: string[], lenient: boolean): SliceInf
   }
   if (!slices.length) throw new ParseError('Fat Mach-O has no readable slices', true);
   return slices;
+}
+
+function looksLikeJavaClass(word: number): boolean {
+  const minor = word >>> 16;
+  const major = word & 0xffff;
+  return minor < 64 && major >= 45 && major <= 80;
+}
+
+function readFat64(reader: Reader, offset: number): number | null {
+  const hi = reader.u32be(offset);
+  const lo = reader.u32be(offset + 4);
+  if (hi !== 0) return null;
+  return lo;
 }
 
 /** parseThin offsets are relative to the slice. Callers read the original buffer. */
@@ -191,21 +224,26 @@ function parseThin(bytes: Uint8Array, lenient: boolean, warnings: string[]): Par
       cmdsize = reader.u32(cursor + 4);
       if (cmdsize < 8 || cursor + cmdsize > bytes.length) throw new ParseError(`Load command ${index} is truncated`, true);
       if (cmd === LC_SEGMENT || cmd === LC_SEGMENT_64) {
-        readSegment(reader, cursor, cmd === LC_SEGMENT_64, segments, sectionInfos);
+        readSegment(reader, cursor, cmdsize, cmd === LC_SEGMENT_64, segments, sectionInfos, warnings);
       } else if (cmd === LC_SYMTAB) {
+        if (cmdsize < 24) throw new ParseError(`Load command ${index} is too small for LC_SYMTAB`, true);
         symOff = reader.u32(cursor + 8);
         nsyms = reader.u32(cursor + 12);
         strOff = reader.u32(cursor + 16);
         strSize = reader.u32(cursor + 20);
       } else if (cmd === LC_LOAD_DYLIB || cmd === LC_ID_DYLIB) {
+        if (cmdsize < 24) throw new ParseError(`Load command ${index} is too small for a dylib command`, true);
         const nameOffset = reader.u32(cursor + 8);
-        libraries.push(reader.cstr(cursor + nameOffset, cmdsize));
+        if (nameOffset >= cmdsize) throw new ParseError(`Dylib name is outside load command ${index}`, true);
+        libraries.push(reader.cstr(cursor + nameOffset, cmdsize - nameOffset));
       } else if (cmd === LC_MAIN) {
+        if (cmdsize < 24) throw new ParseError(`Load command ${index} is too small for LC_MAIN`, true);
         const entryoff = reader.u64(cursor + 8);
         entry = fileOffsetToVa(segments, entryoff);
       } else if (cmd === LC_UNIXTHREAD) {
         entry = readThreadEntry(reader, cursor, cmdsize, arch, warnings);
       } else if (cmd === LC_DYLD_INFO || cmd === LC_DYLD_INFO_ONLY) {
+        if (cmdsize < 48) throw new ParseError(`Load command ${index} is too small for LC_DYLD_INFO`, true);
         exportOff = reader.u32(cursor + 40);
         exportSize = reader.u32(cursor + 44);
       }
@@ -281,7 +319,15 @@ function parseThin(bytes: Uint8Array, lenient: boolean, warnings: string[]): Par
   };
 }
 
-function readSegment(reader: Reader, cursor: number, is64: boolean, segments: Region[], sections: SecInfo[]): void {
+function readSegment(
+  reader: Reader,
+  cursor: number,
+  cmdsize: number,
+  is64: boolean,
+  segments: Region[],
+  sections: SecInfo[],
+  warnings: string[],
+): void {
   const name = reader.cstr(cursor + 8, 16);
   let vmaddr: number;
   let vmsize: number;
@@ -291,6 +337,7 @@ function readSegment(reader: Reader, cursor: number, is64: boolean, segments: Re
   let nsects: number;
   let sectionStart: number;
   if (is64) {
+    if (cmdsize < 72) throw new ParseError('LC_SEGMENT_64 is truncated', true);
     vmaddr = reader.u64(cursor + 24);
     vmsize = reader.u64(cursor + 32);
     fileoff = reader.u64(cursor + 40);
@@ -299,6 +346,7 @@ function readSegment(reader: Reader, cursor: number, is64: boolean, segments: Re
     nsects = reader.u32(cursor + 64);
     sectionStart = cursor + 72;
   } else {
+    if (cmdsize < 56) throw new ParseError('LC_SEGMENT is truncated', true);
     vmaddr = reader.u32(cursor + 24);
     vmsize = reader.u32(cursor + 28);
     fileoff = reader.u32(cursor + 32);
@@ -306,6 +354,16 @@ function readSegment(reader: Reader, cursor: number, is64: boolean, segments: Re
     initprot = reader.i32(cursor + 44);
     nsects = reader.u32(cursor + 48);
     sectionStart = cursor + 56;
+  }
+  const sectionSize = is64 ? 80 : 68;
+  const headerBytes = is64 ? 72 : 56;
+  const declared = nsects;
+  nsects = Math.min(declared, Math.max(0, Math.floor((cmdsize - headerBytes) / sectionSize)));
+  if (nsects < declared) warnings.push(`Segment section count ${declared} does not fit in the load command`);
+  const room = MAX_MACHO_SECTIONS - sections.length;
+  if (nsects > room) {
+    warnings.push(`Section list was capped at ${MAX_MACHO_SECTIONS}`);
+    nsects = Math.max(0, room);
   }
   const executable = (initprot & VM_PROT_EXECUTE) !== 0;
   segments.push({
@@ -319,7 +377,6 @@ function readSegment(reader: Reader, cursor: number, is64: boolean, segments: Re
     writable: (initprot & VM_PROT_WRITE) !== 0,
     readable: (initprot & VM_PROT_READ) !== 0,
   });
-  const sectionSize = is64 ? 80 : 68;
   for (let index = 0; index < nsects; index += 1) {
     const at = sectionStart + index * sectionSize;
     const sectname = reader.cstr(at, 16);
@@ -408,8 +465,17 @@ function readExportTrie(bytes: Uint8Array, offset: number, size: number, imageBa
   }
   const data = bytes.subarray(offset, offset + size);
   const seen = new Set<string>();
-  const walk = (node: number, prefix: string, depth: number): void => {
-    if (depth > 32 || node < 0 || node >= data.length) return;
+  const visited = new Set<number>();
+  let nodes = 0;
+  let capped = false;
+  const walk = (node: number, prefix: string): void => {
+    if (capped || nodes >= MAX_TRIE_NODES || exports.length >= MAX_TRIE_EXPORTS) {
+      capped = true;
+      return;
+    }
+    if (node < 0 || node >= data.length || visited.has(node)) return;
+    visited.add(node);
+    nodes += 1;
     try {
       const terminal = uleb(data, node);
       let cursor = terminal.next;
@@ -417,10 +483,10 @@ function readExportTrie(bytes: Uint8Array, offset: number, size: number, imageBa
         const flags = uleb(data, cursor);
         if ((flags.value & 0x08) === 0) {
           const symbolOffset = uleb(data, flags.next);
-          const key = prefix;
-          if (!seen.has(key)) {
-            seen.add(key);
-            exports.push({ name: prefix, address: imageBase + symbolOffset.value, ordinal: null });
+          if (!seen.has(prefix) && symbolOffset.value !== null) {
+            seen.add(prefix);
+            const address = imageBase + symbolOffset.value;
+            if (Number.isSafeInteger(address)) exports.push({ name: prefix, address, ordinal: null });
           }
         }
       }
@@ -428,26 +494,27 @@ function readExportTrie(bytes: Uint8Array, offset: number, size: number, imageBa
       if (cursor >= data.length) return;
       const children = data[cursor] ?? 0;
       cursor += 1;
-      for (let index = 0; index < children; index += 1) {
+      for (let index = 0; index < children && cursor < data.length; index += 1) {
         let edge = '';
-        while (cursor < data.length && data[cursor] !== 0) {
+        while (cursor < data.length && data[cursor] !== 0 && edge.length < 256) {
           edge += String.fromCharCode(data[cursor] ?? 0);
           cursor += 1;
         }
-        cursor += 1;
+        if (cursor < data.length && data[cursor] === 0) cursor += 1;
         const child = uleb(data, cursor);
         cursor = child.next;
-        walk(child.value, prefix + edge, depth + 1);
+        walk(child.value, prefix + edge);
       }
     } catch {
       warnings.push('Export trie node was skipped');
     }
   };
   try {
-    walk(0, '', 0);
+    walk(0, '');
   } catch {
     warnings.push('Export trie could not be read');
   }
+  if (capped) warnings.push(`Export trie was capped at ${MAX_TRIE_NODES} nodes`);
 }
 
 function readThreadEntry(reader: Reader, cursor: number, cmdsize: number, arch: ArchInfo, warnings: string[]): number | null {

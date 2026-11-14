@@ -4,7 +4,7 @@ import { vaForFileOffset, fileOffsetForVa, assertFileSize } from '../binary/addr
 import type { AnalyzeResult, FunctionIR, FunctionSummary, ParsedBinary, ProjectData, StringIR, XrefIR } from '../ir/types';
 import { deleteAllLocalData, listBinaries, loadBinary, loadProject, saveBinary, saveProject } from '../storage/db';
 import { parseProjectFile } from '../storage/projectFile';
-import { AnalysisClient } from './client';
+import { ANALYSIS_TIMEOUT_MS, AnalysisClient } from './client';
 import { pushHistory, stepHistory } from './history';
 
 export interface WorkspaceState {
@@ -198,10 +198,34 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         sliceOffset,
         progress: { phase: 'Starting', ratio: 0.02 },
       }));
-      const response = await client.current!.analyze(buffer, lenient, sliceOffset, (phase, ratio) => {
+      let response;
+      let timer = 0;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = window.setTimeout(() => reject(new Error('Analysis timed out. The file may be malformed.')), ANALYSIS_TIMEOUT_MS);
+      });
+      const analysis = client.current!.analyze(buffer, lenient, sliceOffset, (phase, ratio) => {
         if (generation.current !== id) return;
         setState((current) => ({ ...current, progress: { phase, ratio } }));
       });
+      void analysis.catch(() => undefined);
+      try {
+        response = await Promise.race([analysis, timeout]);
+      } catch (error) {
+        if (generation.current !== id) return;
+        if (!(error instanceof Error) || !error.message.includes('worker stopped')) {
+          client.current?.fail(error instanceof Error ? error.message : 'Analysis failed');
+        }
+        setState((current) => ({
+          ...current,
+          phase: 'error',
+          progress: null,
+          error: error instanceof Error ? error.message : 'Analysis failed',
+          recoverable: false,
+        }));
+        return;
+      } finally {
+        window.clearTimeout(timer);
+      }
       if (generation.current !== id) return;
       if (response.kind === 'cancelled') {
         setState((current) => ({ ...current, phase: current.binary ? 'ready' : 'empty', progress: null, error: '' }));
@@ -259,8 +283,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       openFile,
       cancel: () => {
         generation.current += 1;
+        const keep = client.current?.hasSession() ?? false;
         client.current?.cancel();
-        setState((current) => ({ ...current, phase: current.binary ? 'ready' : 'empty', progress: null }));
+        setState((current) => keep
+          ? { ...current, phase: 'ready', progress: null, notice: 'Analysis cancelled.' }
+          : {
+              ...initialState,
+              fontScale: current.fontScale,
+              contrast: current.contrast,
+              sessionOnly: current.sessionOnly,
+              notice: 'Analysis cancelled.',
+            });
       },
       parseAnyway: async () => {
         const buffer = bytesRef.current;
@@ -307,10 +340,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         });
       },
       ensureFunction: async (address: number) => {
+        const token = generation.current;
         const key = addressKey(address);
         if (state.loaded[key]) return;
-        const response = await client.current!.disassemble(address);
-        if (response.kind !== 'function') return;
+        let response;
+        try {
+          response = await client.current!.disassemble(address);
+        } catch (error) {
+          if (token !== generation.current) return;
+          setState((current) => ({
+            ...current,
+            notice: error instanceof Error ? error.message : 'Disassembly failed',
+          }));
+          return;
+        }
+        if (token !== generation.current || response.kind !== 'function') return;
         setState((current) => {
           const functions = [...current.functions];
           for (const discovered of response.discovered) {

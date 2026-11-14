@@ -60,13 +60,19 @@ export class Reader {
     return { hi, lo };
   }
 
-  u64(offset: number): number {
+  u64Maybe(offset: number): { value: number | null; hex: string } {
     const { hi, lo } = this.u64Parts(offset);
+    const hex = `0x${hi.toString(16).padStart(8, '0')}${lo.toString(16).padStart(8, '0')}`;
     const value = hi * 0x100000000 + lo;
-    if (!Number.isSafeInteger(value)) {
-      throw new ParseError('64-bit value exceeds the safe integer range', true);
+    return { value: Number.isSafeInteger(value) ? value : null, hex };
+  }
+
+  u64(offset: number): number {
+    const field = this.u64Maybe(offset);
+    if (field.value === null) {
+      throw new ParseError(`64-bit value ${field.hex} exceeds the safe integer range`, true);
     }
-    return value;
+    return field.value;
   }
 
   /** Big-endian unsigned integers, used by Mach-O fat headers. */

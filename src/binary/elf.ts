@@ -1,4 +1,5 @@
 import type { ArchInfo, ExportRecord, HeaderField, ImportRecord, ParsedBinary, Region, SymbolRecord } from '../ir/types';
+import { mergeFileSpans } from './ranges';
 import { ParseError, Reader, hex } from './reader';
 
 const ET_REL = 1;
@@ -30,12 +31,18 @@ const DT_NEEDED = 1;
 const DT_STRTAB = 5;
 const DT_STRSZ = 10;
 
+const MAX_ELF_SECTIONS = 100_000;
+const MAX_ELF_SYMBOLS = 200_000;
+const MAX_NOTES = 64;
+const SHN_XINDEX = 0xffff;
+
 interface ElfHeader {
   classBits: 32 | 64;
   little: boolean;
   type: number;
   machine: number;
-  entry: number;
+  entry: number | null;
+  entryHex: string;
   phoff: number;
   shoff: number;
   flags: number;
@@ -96,6 +103,7 @@ export function parseElf(bytes: Uint8Array, lenient: boolean): ParsedBinary {
   }
 
   const rawSections: RawSection[] = [];
+  extendSectionCount(reader, header, warnings);
   try {
     readSectionHeaders(reader, header, rawSections, warnings, lenient);
   } catch (error) {
@@ -111,19 +119,22 @@ export function parseElf(bytes: Uint8Array, lenient: boolean): ParsedBinary {
   const exports: ExportRecord[] = [];
   const libraries: string[] = [];
   try {
-    readSymbols(reader, rawSections, sections, symbols, imports, exports, libraries, warnings, lenient);
+    readSymbols(reader, header.classBits === 64, rawSections, sections, symbols, imports, exports, libraries, warnings, lenient);
   } catch (error) {
     if (!lenient) throw error;
     warnings.push(error instanceof Error ? error.message : 'Symbol tables could not be read');
   }
 
+  if (header.entry === null && header.entryHex !== '0x0000000000000000' && header.entryHex !== '0x0') {
+    warnings.push(`Entry point ${header.entryHex} does not fit in a safe integer, so it is shown but not used for disassembly`);
+  }
   const notes = readNotes(reader, rawSections, segments, warnings);
   const fields: HeaderField[] = [
     { label: 'Class', value: `ELF${classBits}` },
     { label: 'Endianness', value: little ? 'little' : 'big' },
     { label: 'Type', value: elfType(header.type) },
     { label: 'Machine', value: `${machineName(header.machine)} (${header.machine})` },
-    { label: 'Entry', value: header.entry ? hex(header.entry) : 'none' },
+    { label: 'Entry', value: header.entry === null ? header.entryHex : hex(header.entry) },
     { label: 'Flags', value: hex(header.flags) },
     { label: 'Program headers', value: String(segments.length) },
     { label: 'Sections', value: String(sections.length) },
@@ -134,7 +145,7 @@ export function parseElf(bytes: Uint8Array, lenient: boolean): ParsedBinary {
   return {
     format: 'elf',
     arch,
-    entryPoint: header.entry || null,
+    entryPoint: header.entry,
     imageBase: segments.find((segment) => segment.executable)?.address ?? segments[0]?.address ?? 0,
     sections: sections.filter((section) => section.name.length > 0 || section.size > 0 || section.fileSize > 0),
     segments,
@@ -177,14 +188,18 @@ function partialElf(fileSize: number, bits: 32 | 64, little: boolean, warnings: 
 
 function readHeader(reader: Reader, classBits: 32 | 64, little: boolean): ElfHeader {
   if (classBits === 64) {
+    const entry = reader.u64Maybe(24);
+    const phoff = reader.u64Maybe(32);
+    const shoff = reader.u64Maybe(40);
     return {
       classBits,
       little,
       type: reader.u16(16),
       machine: reader.u16(18),
-      entry: reader.u64(24),
-      phoff: reader.u64(32),
-      shoff: reader.u64(40),
+      entry: entry.value,
+      entryHex: entry.hex,
+      phoff: phoff.value ?? 0,
+      shoff: shoff.value ?? 0,
       flags: reader.u32(48),
       phentsize: reader.u16(54),
       phnum: reader.u16(56),
@@ -193,12 +208,14 @@ function readHeader(reader: Reader, classBits: 32 | 64, little: boolean): ElfHea
       shstrndx: reader.u16(62),
     };
   }
+  const entry = reader.u32(24);
   return {
     classBits,
     little,
     type: reader.u16(16),
     machine: reader.u16(18),
-    entry: reader.u32(24),
+    entry,
+    entryHex: hex(entry),
     phoff: reader.u32(28),
     shoff: reader.u32(32),
     flags: reader.u32(36),
@@ -208,6 +225,31 @@ function readHeader(reader: Reader, classBits: 32 | 64, little: boolean): ElfHea
     shnum: reader.u16(48),
     shstrndx: reader.u16(50),
   };
+}
+
+function extendSectionCount(reader: Reader, header: ElfHeader, warnings: string[]): void {
+  if (header.shoff === 0 || (header.shnum !== 0 && header.shstrndx !== SHN_XINDEX)) {
+    if (header.shnum > MAX_ELF_SECTIONS) {
+      warnings.push(`Section count ${header.shnum} was capped at ${MAX_ELF_SECTIONS}`);
+      header.shnum = MAX_ELF_SECTIONS;
+    }
+    return;
+  }
+  try {
+    const linkAt = header.classBits === 64 ? header.shoff + 40 : header.shoff + 24;
+    const size = header.classBits === 64 ? reader.u64Maybe(header.shoff + 32).value : reader.u32(header.shoff + 20);
+    if (header.shnum === 0) {
+      if (size === null || size > MAX_ELF_SECTIONS) {
+        warnings.push('The extended section count is not usable');
+        header.shnum = size === null ? 0 : MAX_ELF_SECTIONS;
+      } else {
+        header.shnum = size;
+      }
+    }
+    if (header.shstrndx === SHN_XINDEX) header.shstrndx = reader.u32(linkAt);
+  } catch {
+    warnings.push('Could not read the extended ELF section count');
+  }
 }
 
 function readProgramHeaders(reader: Reader, header: ElfHeader, segments: Region[], warnings: string[], lenient: boolean): void {
@@ -303,7 +345,7 @@ function readSectionHeaders(reader: Reader, header: ElfHeader, sections: RawSect
       const message = `Skipped section header ${index}: ${error instanceof Error ? error.message : 'unreadable'}`;
       if (!lenient) throw new ParseError(message, true);
       warnings.push(message);
-      break;
+      continue;
     }
   }
 }
@@ -344,6 +386,7 @@ function lookupString(table: Uint8Array, offset: number): string {
 
 function readSymbols(
   reader: Reader,
+  is64: boolean,
   rawSections: RawSection[],
   sections: Region[],
   symbols: SymbolRecord[],
@@ -353,17 +396,33 @@ function readSymbols(
   warnings: string[],
   lenient: boolean,
 ): void {
-  const dynamic = findDynamic(reader, rawSections, warnings);
+  const dynamic = findDynamic(reader, is64, rawSections, warnings);
   for (const needed of dynamic.needed) libraries.push(needed);
+  const entrySize = is64 ? 24 : 16;
+  const seen = new Set<string>();
+  let total = 0;
 
   for (const section of rawSections) {
     if (section.type !== SHT_SYMTAB && section.type !== SHT_DYNSYM) continue;
+    if (section.entsize !== 0 && section.entsize !== entrySize) {
+      warnings.push(`Skipped a symbol table whose entry size is ${section.entsize}, not ${entrySize}`);
+      continue;
+    }
+    const rangeKey = `${section.offset}:${section.size}`;
+    if (seen.has(rangeKey)) {
+      warnings.push('Skipped a repeated symbol table');
+      continue;
+    }
+    seen.add(rangeKey);
     const strings = readStringTable(reader, rawSections[section.link], warnings);
-    const ent = section.entsize || (reader.bytes.length > 4 && reader.bytes[4] === 2 ? 24 : 16);
-    const is64 = ent >= 24;
-    const count = ent > 0 ? Math.floor(section.size / ent) : 0;
+    const count = entrySize > 0 ? Math.floor(section.size / entrySize) : 0;
     for (let index = 0; index < count; index += 1) {
-      const offset = section.offset + index * ent;
+      if (total >= MAX_ELF_SYMBOLS) {
+        warnings.push(`Symbol list was capped at ${MAX_ELF_SYMBOLS}`);
+        return;
+      }
+      total += 1;
+      const offset = section.offset + index * entrySize;
       try {
         const nameOffset = reader.u32(offset);
         let info: number;
@@ -420,11 +479,15 @@ function readSymbols(
   }
 }
 
-function findDynamic(reader: Reader, sections: RawSection[], warnings: string[]): { needed: string[] } {
+function findDynamic(reader: Reader, is64: boolean, sections: RawSection[], warnings: string[]): { needed: string[] } {
   const dynamic = sections.find((section) => section.type === 6);
   if (!dynamic) return { needed: [] };
-  const ent = dynamic.entsize || (reader.bytes[4] === 2 ? 16 : 8);
-  const count = ent > 0 ? Math.floor(dynamic.size / ent) : 0;
+  const ent = is64 ? 16 : 8;
+  if (dynamic.entsize !== 0 && dynamic.entsize !== ent) {
+    warnings.push(`Skipped a dynamic table whose entry size is ${dynamic.entsize}`);
+    return { needed: [] };
+  }
+  const count = Math.min(4096, ent > 0 ? Math.floor(dynamic.size / ent) : 0);
   let strtabVa = 0;
   let strsz = 0;
   const neededOffsets: number[] = [];
@@ -466,32 +529,43 @@ function vaToOffset(sections: RawSection[], va: number): number | null {
 
 function readNotes(reader: Reader, sections: RawSection[], segments: Region[], warnings: string[]): string[] {
   const notes: string[] = [];
-  const sources: { offset: number; size: number }[] = [];
-  for (const section of sections) {
-    if (section.type === SHT_NOTE && section.size > 0) sources.push({ offset: section.offset, size: section.size });
-  }
-  for (const segment of segments) {
-    if (segment.name === 'PT_NOTE' && segment.fileSize > 0) sources.push({ offset: segment.fileOffset, size: segment.fileSize });
-  }
-  for (const source of sources) {
+  const spans = mergeFileSpans([
+    ...sections.filter((section) => section.type === SHT_NOTE && section.size > 0).map((section) => ({
+      start: section.offset,
+      end: section.offset + section.size,
+      address: section.address,
+      name: '',
+    })),
+    ...segments.filter((segment) => segment.name === 'PT_NOTE' && segment.fileSize > 0).map((segment) => ({
+      start: segment.fileOffset,
+      end: segment.fileOffset + segment.fileSize,
+      address: segment.address,
+      name: '',
+    })),
+  ]).spans;
+  let walked = 0;
+  for (const source of spans) {
+    if (notes.length >= MAX_NOTES) break;
     try {
-      let cursor = source.offset;
-      const end = source.offset + source.size;
-      while (cursor + 12 <= end && cursor + 12 <= reader.length) {
-        const namesz = reader.u32(cursor);
-        const descsz = reader.u32(cursor + 4);
+      let cursor = source.start;
+      const end = Math.min(source.end, reader.length);
+      while (cursor + 12 <= end && notes.length < MAX_NOTES && walked < 1_048_576) {
+        const namesz = Math.min(reader.u32(cursor), 1_048_576);
+        const descsz = Math.min(reader.u32(cursor + 4), 1_048_576);
         const type = reader.u32(cursor + 8);
         const name = namesz > 1 ? reader.cstr(cursor + 12, Math.min(namesz, 64)) : '';
         notes.push(`${name || 'note'} type ${type} (${descsz} bytes)`);
         const step = 12 + align4(namesz) + align4(descsz);
         if (step <= 0) break;
         cursor += step;
+        walked += step;
       }
     } catch {
       warnings.push('A note segment was truncated');
     }
   }
-  return notes.slice(0, 8);
+  if (notes.length >= MAX_NOTES) warnings.push(`Note list was capped at ${MAX_NOTES}`);
+  return notes;
 }
 
 function align4(value: number): number {

@@ -2,6 +2,7 @@
   "name": "webdra",
   "compatibility_date": "2026-11-14",
   "workers_dev": true,
+  "preview_urls": false,
   "logpush": false,
   "observability": {
     "enabled": false

@@ -94,7 +94,10 @@ button:disabled { opacity: 0.45; cursor: default; }
 .tabs { display: flex; gap: 4px; }
 .tab { background: transparent; }
 .tab.active { border-color: var(--accent); }
-.virtual { flex: 1; overflow: auto; min-height: 120px; background: var(--bg-listing); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.virtual { flex: 1; overflow: auto; min-height: 120px; max-height: 280px; background: var(--bg-listing); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.listing .virtual, .pane.listing .virtual { max-height: none; }
+.hex-pager { display: flex; gap: 8px; align-items: center; padding: 4px 8px; }
+.hex-pager input[type='range'] { flex: 1; }
 .row, .insn, .hex-row {
   width: 100%;
   display: flex;
