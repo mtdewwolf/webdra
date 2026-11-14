@@ -1,0 +1,14 @@
+node_modules
+dist
+test-results
+playwright-report
+blob-report
+.vite
+*.tsbuildinfo
+.DS_Store
+.wrangler
+.dev.vars
+.env
+.env.*
+!.env.example
+public/capstone.wasm
