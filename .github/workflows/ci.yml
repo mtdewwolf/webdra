@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [Master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Audit
+        run: npm audit --audit-level=high
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Privacy bundle check
+        run: npm run check:bundle
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end
+        run: npm run test:e2e

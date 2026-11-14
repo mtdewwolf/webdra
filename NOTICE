@@ -1,0 +1,10 @@
+Webdra
+Copyright 2026 Webdra contributors
+
+This product includes the Capstone disassembly framework (BSD-3-Clause)
+and the Capstone.js WebAssembly port by Alexandro Sanchez Bach
+(BSD-3-Clause). See THIRD_PARTY_LICENSES.
+
+Webdra does not include NSA Ghidra source, SLEIGH specifications, or
+the Ghidra decompiler. A future decompiler build would have to keep
+Ghidra's Apache-2.0 attribution and NOTICE.
