@@ -15,6 +15,10 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_PAGES: '1'
+      BASE_PATH: /webdra/
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173/webdra/
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -28,10 +32,16 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
-        env:
-          GITHUB_PAGES: '1'
+      - name: Privacy bundle check
+        run: npm run check:bundle
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end
+        run: npm run test:e2e
       - name: Upload artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:

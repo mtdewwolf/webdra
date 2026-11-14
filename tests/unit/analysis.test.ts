@@ -9,7 +9,7 @@ import type { InstructionIR } from '../../src/ir/types';
 import { assertFileSize, MAX_FILE_BYTES } from '../../src/binary/address';
 import { pushHistory, stepHistory } from '../../src/ui/history';
 import { shouldCacheRequest } from '../../src/privacy/cachePolicy';
-import { renderServiceWorker } from '../../src/privacy/serviceWorkerSource';
+import { renderServiceWorker, shellCacheName } from '../../src/privacy/serviceWorkerSource';
 
 describe('demangle', () => {
   it('decodes Itanium nested names', () => {
@@ -54,7 +54,12 @@ describe('helpers', () => {
     expect(shouldCacheRequest('GET', 'https://webdra.test', 'https://webdra.test', '/blob', assets)).toBe(false);
     const source = renderServiceWorker(assets);
     expect(source).toContain('"/assets/app.js"');
+    expect(source).toContain("cache: 'reload'");
+    expect(source).toContain("request.mode === 'navigate'");
+    expect(source).toContain(shellCacheName(assets));
+    expect(source).not.toContain('webdra-shell-v1');
     expect(source).not.toContain('https://');
+    expect(shellCacheName(assets)).not.toBe(shellCacheName(['/other.js']));
   });
 
   it('treats jmp as an unconditional jump with no fallthrough edge', () => {

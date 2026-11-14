@@ -21,8 +21,16 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
+      - name: Privacy bundle check
+        run: npm run check:bundle
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end
+        run: npm run test:e2e
       - name: Check Cloudflare secrets
         id: cloudflare
         env:

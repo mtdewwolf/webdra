@@ -18,7 +18,10 @@ describe('content security policy', () => {
       expect(headerCsp.includes(forbidden)).toBe(false);
     }
     expect(metaCsp.includes("'unsafe-eval'")).toBe(false);
-    expect(headerCsp).toContain("worker-src 'self' blob:");
+    expect(headerCsp).toContain("worker-src 'self'");
+    expect(metaCsp.includes('blob:')).toBe(false);
+    expect(metaCsp.includes('data:')).toBe(false);
+    expect(headerCsp.includes('blob:')).toBe(false);
     expect(headers).toContain('X-Frame-Options: DENY');
     expect(headers).toContain('Referrer-Policy: no-referrer');
     expect(headers).toContain('Cross-Origin-Opener-Policy: same-origin');

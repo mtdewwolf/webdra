@@ -3,6 +3,7 @@ import { addressKey } from '../analysis/format';
 import { vaForFileOffset, fileOffsetForVa, assertFileSize } from '../binary/address';
 import type { AnalyzeResult, FunctionIR, FunctionSummary, ParsedBinary, ProjectData, StringIR, XrefIR } from '../ir/types';
 import { deleteAllLocalData, listBinaries, loadBinary, loadProject, saveBinary, saveProject } from '../storage/db';
+import { parseProjectFile } from '../storage/projectFile';
 import { AnalysisClient } from './client';
 import { pushHistory, stepHistory } from './history';
 
@@ -382,9 +383,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setFontScale: (value) => setState((current) => ({ ...current, fontScale: Math.min(1.6, Math.max(0.8, value)) })),
       setContrast: (value) => setState((current) => ({ ...current, contrast: value })),
       wipe: async () => {
-        await deleteAllLocalData();
+        try {
+          await deleteAllLocalData();
+        } catch (error) {
+          setState((current) => ({
+            ...current,
+            notice: error instanceof Error ? error.message : 'Could not delete local data.',
+          }));
+          return;
+        }
+        prefsRef.current = { sessionOnly: false, storeBinary: false };
         bytesRef.current = null;
-        setState({ ...initialState, notice: 'Local notes, bookmarks, and optional file copies were deleted.' });
+        setState({ ...initialState, notice: 'Webdra notes, bookmarks, and optional file copies were deleted.' });
       },
       exportProject: () => {
         if (!state.sha256) return;
@@ -404,19 +414,29 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         URL.revokeObjectURL(url);
       },
       importProject: async (file: File) => {
-        const text = await file.text();
-        const parsed = JSON.parse(text) as ProjectData;
-        if (parsed.version !== 1 || typeof parsed.sha256 !== 'string') throw new Error('This is not a Webdra project file.');
-        if (state.sha256 && parsed.sha256 !== state.sha256) {
-          setState((current) => ({ ...current, notice: 'Project hash does not match the open file. It was not applied.' }));
+        let parsed: ProjectData;
+        try {
+          parsed = parseProjectFile(JSON.parse(await file.text()) as unknown, state.sha256 || null);
+        } catch (error) {
+          setState((current) => ({
+            ...current,
+            notice: error instanceof Error ? error.message : 'Could not import notes.',
+          }));
           return;
         }
-        if (!state.sessionOnly) await saveProject(parsed);
+        if (!prefsRef.current.sessionOnly) {
+          try {
+            await saveProject(parsed);
+          } catch {
+            setState((current) => ({ ...current, notice: 'Could not save imported notes in this browser.' }));
+            return;
+          }
+        }
         setState((current) => ({
           ...current,
-          renames: parsed.renames ?? {},
-          comments: parsed.comments ?? {},
-          bookmarks: parsed.bookmarks ?? [],
+          renames: parsed.renames,
+          comments: parsed.comments,
+          bookmarks: parsed.bookmarks,
           notice: 'Project notes imported.',
         }));
       },

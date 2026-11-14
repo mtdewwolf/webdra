@@ -1,7 +1,8 @@
 /**
  * Single source of truth for Webdra's Content-Security-Policy.
  * The meta tag cannot express frame-ancestors; the HTTP header can.
- * Keep worker-src limited to 'self' and blob: with no wildcards.
+ * worker-src is 'self' only. Production workers are same-origin module scripts.
+ * img-src is 'self' only. The UI does not render data: or blob: images.
  */
 
 /** @type {[string, string[]][]} */
@@ -9,8 +10,8 @@ export const sharedDirectives = [
   ['default-src', ["'none'"]],
   ['script-src', ["'self'", "'wasm-unsafe-eval'"]],
   ['connect-src', ["'self'"]],
-  ['img-src', ["'self'", 'data:', 'blob:']],
-  ['worker-src', ["'self'", 'blob:']],
+  ['img-src', ["'self'"]],
+  ['worker-src', ["'self'"]],
   ['style-src', ["'self'"]],
   ['font-src', ["'self'"]],
   ['manifest-src', ["'self'"]],
