@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { fileOffsetForVa } from '../../src/binary/address';
 import { disassembleFunction } from '../../src/analysis/disasm';
+import type { ParsedBinary } from '../../src/ir/types';
 import { extractStrings } from '../../src/analysis/strings';
 import { parseBinary, ParseError } from '../../src/binary/parse';
 
@@ -60,23 +62,32 @@ describe('compiled fixtures', () => {
     expect(binary.entryPoint).toBe(exported!.address);
   });
 
-  it('parses Mach-O slices and disassembles _main', async () => {
+  it('parses Mach-O slices and disassembles _main from the original file', async () => {
     const bytes = load('macho-fat');
     const binary = parseBinary(bytes);
     expect(binary.format).toBe('macho');
     expect(binary.slices.length).toBe(2);
     const main = binary.symbols.find((symbol) => symbol.name === '_main');
     expect(main?.kind).toBe('function');
-    const decoded = await disassembleFunction(bytes.subarray(binary.slices[0]!.offset, binary.slices[0]!.offset + binary.slices[0]!.size), parseBinary(bytes), main!.address);
-    expect(decoded.instructions.some((instruction) => instruction.mnemonic === 'ret')).toBe(true);
+    const decoded = await disassembleFunction(bytes, binary, main!.address);
+    expect(decoded.instructions.map((instruction) => instruction.mnemonic)).toEqual(['mov', 'ret']);
+    const fileOffset = binary.sections.find((section) => section.executable)?.fileOffset;
+    expect(fileOffset).toBeGreaterThan(0);
+    expect(bytes[fileOffsetForExecutable(binary, main!.address)]).toBe(decoded.instructions[0]?.bytes[0]);
     const arm = parseBinary(bytes, { sliceOffset: binary.slices[1]!.offset });
     expect(arm.arch.arch).toBe('arm64');
     const armMain = arm.symbols.find((symbol) => symbol.name === '_main');
-    const armBytes = bytes.subarray(binary.slices[1]!.offset, binary.slices[1]!.offset + binary.slices[1]!.size);
-    const armFn = await disassembleFunction(armBytes, arm, armMain!.address);
+    const armFn = await disassembleFunction(bytes, arm, armMain!.address);
     expect(armFn.instructions.map((instruction) => instruction.mnemonic)).toEqual(['mov', 'ret']);
+    expect(bytes[fileOffsetForExecutable(arm, armMain!.address)]).toBe(armFn.instructions[0]?.bytes[0]);
   });
 });
+
+function fileOffsetForExecutable(binary: ParsedBinary, address: number): number {
+  const offset = fileOffsetForVa(binary, address);
+  expect(offset).not.toBeNull();
+  return offset ?? 0;
+}
 
 describe('malformed input', () => {
   it('rejects a truncated ELF until parse-anyway is requested', () => {

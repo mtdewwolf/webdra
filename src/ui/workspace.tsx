@@ -109,6 +109,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const client = useRef<AnalysisClient | null>(null);
   const generation = useRef(0);
   const bytesRef = useRef<ArrayBuffer | null>(null);
+  const prefsRef = useRef({
+    sessionOnly: sessionStorage.getItem('webdra.session') === '1',
+    storeBinary: false,
+  });
   if (!client.current) client.current = new AnalysisClient();
 
   useEffect(() => {
@@ -208,8 +212,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
       if (response.kind !== 'analyzed') return;
       let project: ProjectData | null = null;
-      const sessionOnly = state.sessionOnly;
-      if (!sessionOnly) {
+      if (!prefsRef.current.sessionOnly) {
         try {
           project = await loadProject(response.result.sha256);
         } catch {
@@ -217,14 +220,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       }
       if (generation.current !== id) return;
+      if (prefsRef.current.sessionOnly) project = null;
       applyResult(response.result, fileLabel, project);
-      if (!sessionOnly && state.storeBinary) {
+      if (!prefsRef.current.sessionOnly && prefsRef.current.storeBinary) {
         void saveBinary({ sha256: response.result.sha256, bytes: buffer.slice(0), savedAt: Date.now() }).catch(() => {
-          setState((current) => ({ ...current, notice: 'The browser refused to store a local copy (quota).' }));
+          prefsRef.current.storeBinary = false;
+          setState((current) => ({ ...current, storeBinary: false, notice: 'The browser refused to store a local copy (quota).' }));
         });
       }
     },
-    [applyResult, state.sessionOnly, state.storeBinary],
+    [applyResult],
   );
 
   const openFile = useCallback(
@@ -353,17 +358,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         });
       },
       setSessionOnly: (value) => {
+        prefsRef.current.sessionOnly = value;
+        if (value) prefsRef.current.storeBinary = false;
         sessionStorage.setItem('webdra.session', value ? '1' : '0');
         setState((current) => ({
           ...current,
           sessionOnly: value,
+          storeBinary: value ? false : current.storeBinary,
           notice: value ? 'Session-only mode is on. Nothing is written to IndexedDB.' : 'Notes can be saved in this browser again.',
         }));
       },
       setStoreBinary: (value) => {
-        setState((current) => ({ ...current, storeBinary: value && !current.sessionOnly }));
-        if (value && !state.sessionOnly && bytesRef.current && state.sha256) {
+        const enabled = value && !prefsRef.current.sessionOnly;
+        prefsRef.current.storeBinary = enabled;
+        setState((current) => ({ ...current, storeBinary: enabled }));
+        if (enabled && bytesRef.current && state.sha256) {
           void saveBinary({ sha256: state.sha256, bytes: bytesRef.current.slice(0), savedAt: Date.now() }).catch(() => {
+            prefsRef.current.storeBinary = false;
             setState((current) => ({ ...current, storeBinary: false, notice: 'The browser refused to store a local copy.' }));
           });
         }

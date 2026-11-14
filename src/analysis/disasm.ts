@@ -6,7 +6,7 @@ import { demangle } from './demangle';
 
 export const MAX_INSTRUCTIONS = 4000;
 
-const CONDITIONAL = /^(j[a-z]+|loop|loope|loopne|b\.[a-z]+|cbz|cbnz|tbz|tbnz)$/;
+const CONDITIONAL = /^(j(?!mp$)[a-z]+|loop|loope|loopne|b\.[a-z]+|cbz|cbnz|tbz|tbnz)$/;
 
 export async function disassembleFunction(
   bytes: Uint8Array,
@@ -154,8 +154,8 @@ function classify(mnemonic: string): InstructionIR['flow'] {
   const name = mnemonic.toLowerCase();
   if (name === 'ret' || name === 'retq' || name === 'retf' || name.startsWith('ret ')) return 'ret';
   if (name === 'call' || name === 'bl' || name === 'blr') return 'call';
-  if (CONDITIONAL.test(name)) return 'cjump';
   if (name === 'jmp' || name === 'b' || name === 'br') return 'jump';
+  if (CONDITIONAL.test(name)) return 'cjump';
   return 'seq';
 }
 

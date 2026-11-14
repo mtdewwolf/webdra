@@ -55,6 +55,7 @@ export function parseMacho(bytes: Uint8Array, lenient: boolean, sliceOffset: num
   const selected = chooseSlice(slices, sliceOffset);
   const sliceBytes = bytes.subarray(selected.offset, selected.offset + selected.size);
   const parsed = parseThin(sliceBytes, lenient, warnings);
+  rebaseFileOffsets(parsed, selected.offset);
   parsed.slices = slices.map((slice) => ({
     offset: slice.offset,
     size: slice.size,
@@ -105,6 +106,14 @@ function readFat(reader: Reader, warnings: string[], lenient: boolean): SliceInf
   }
   if (!slices.length) throw new ParseError('Fat Mach-O has no readable slices', true);
   return slices;
+}
+
+/** parseThin offsets are relative to the slice. Callers read the original buffer. */
+function rebaseFileOffsets(parsed: ParsedBinary, sliceOffset: number): void {
+  if (sliceOffset === 0) return;
+  for (const region of [...parsed.sections, ...parsed.segments]) {
+    if (region.fileSize > 0) region.fileOffset += sliceOffset;
+  }
 }
 
 function chooseSlice(slices: SliceInfo[], sliceOffset: number | null): SliceInfo {

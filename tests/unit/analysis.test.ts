@@ -4,11 +4,12 @@ import { shannonEntropy } from '../../src/analysis/entropy';
 import { fuzzyScore } from '../../src/analysis/fuzzy';
 import { parseBytePattern, searchBytePattern } from '../../src/analysis/pattern';
 import { buildCfg } from '../../src/analysis/cfg';
+import { toInstruction } from '../../src/analysis/disasm';
+import type { InstructionIR } from '../../src/ir/types';
 import { assertFileSize, MAX_FILE_BYTES } from '../../src/binary/address';
 import { pushHistory, stepHistory } from '../../src/ui/history';
 import { shouldCacheRequest } from '../../src/privacy/cachePolicy';
 import { renderServiceWorker } from '../../src/privacy/serviceWorkerSource';
-import type { InstructionIR } from '../../src/ir/types';
 
 describe('demangle', () => {
   it('decodes Itanium nested names', () => {
@@ -54,6 +55,21 @@ describe('helpers', () => {
     const source = renderServiceWorker(assets);
     expect(source).toContain('"/assets/app.js"');
     expect(source).not.toContain('https://');
+  });
+
+  it('treats jmp as an unconditional jump with no fallthrough edge', () => {
+    const jump = toInstruction({
+      address: 0x1000,
+      size: 5,
+      bytes: [0xe9, 0, 0, 0, 0],
+      mnemonic: 'jmp',
+      op_str: '0x2000',
+    });
+    expect(jump.flow).toBe('jump');
+    const ret = instruction(0x1005, 1, 'ret', 'ret');
+    const blocks = buildCfg([jump, ret]);
+    const jumpBlock = blocks.find((block) => block.address === 0x1000);
+    expect(jumpBlock?.successors.some((edge) => edge.kind === 'fallthrough')).toBe(false);
   });
 
   it('splits a conditional branch into two CFG edges', () => {
